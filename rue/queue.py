@@ -755,3 +755,18 @@ class Queue:
                 .run(conn)
             )
             return HeartbeatData(last_seen = res['last_seen'])
+
+    async def change_explanation(self, item: Entry, new_explanation: str):
+        if item.id is None:
+            raise TypeError("Item does not have an identifier")
+        async with connect() as conn:
+            res = await (
+                self._queue()
+                .get(item.id)
+                .update({"explanation": new_explanation}, return_changes = True)
+                .run(conn)
+            )
+            if res['errors']:
+                raise WriteError
+            e = Entry._from_dict(res['changes'][0]['new_val'])
+            return e
