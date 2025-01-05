@@ -1,0 +1,7 @@
+*.egg-info/
+__pycache__/
+*.py[co]
+THING
+*.md.backup
+# SCHEMA.md is currently out of date.
+SCHEMA.md
