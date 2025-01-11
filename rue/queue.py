@@ -512,7 +512,6 @@ class Queue:
             d = reorganized.get(ci['pipeline_type'], {})
             d[status] = count
             reorganized[ci['pipeline_type']] = baseline | d
-        print(baseline, weird_counts, reorganized, sep="\n")
         return QueueStatus(reorganized, in_limbo)
 
     async def store_result(self, item: Entry, from_pipeline: str, tries: int, data: dict[str, typing.Any], result_type: str) -> str:
