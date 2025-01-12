@@ -275,6 +275,12 @@ class Queue:
             nf_queued = lambda row : row['status'].ne(Status.DONE).and_(row['status'].ne(Status.ERROR))
             # Order by effective priority followed by FIFO.
             nf_order = [r.row['priority'] + r.row['tries'], r.row['queued_at']]
+
+            # Allows us to save on index space usage by pruning finished items from the index
+            # done is going to eventually get large, so keeping it out of the index is a good idea.
+            # (RethinkDB doesn't index nulls.)
+            no_done = lambda q : r.branch(r.row['status'].eq(Status.DONE), None, q)
+
             indexes = [
                 # --- Simple indexes
                 # Allow filtering by item name
@@ -284,14 +290,14 @@ class Queue:
                 # True if the item is NOT in done or error.
                 ("nf_queued", nf_queued),
                 # Chonker of an index to filter by status and pipeline type, while still being able to order.
-                ("nf_order", [r.row['status'], r.row['pipeline_type'], r.row['run_on']] + nf_order),
+                ("nf_order", no_done([r.row['status'], r.row['pipeline_type'], r.row['run_on']] + nf_order)),
                 # TODO: Figure out a way to get rid of this.
                 # It's necessary because if you don't use pipeline_type or run_on in the
                 # nf_order index, the regular order will be ignored because they come first.
                 # Because between uses lexographical sorting, we can't put the real order first
                 # as it will short-circuit the actual filters away.
-                # I don't know how expensive an additional index is, but less is probably better.
-                ("nf_order_only", [r.row['status']] + nf_order),
+                # With no_done, it's probably not a huge issue, but it's still ugly.
+                ("nf_order_only", no_done([r.row['status']] + nf_order)),
                 # Item status and time last claimed.
                 ("nf_status", [r.row['status'], r.row['claimed_at'], r.row['claimed_by']]),
                 # None if it is not in todo to save space.
