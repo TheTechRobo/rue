@@ -273,20 +273,30 @@ class Queue:
             # "Why'd you write it like this?" Because I wasted a good 10 minutes of my time
             # trying to get the nicer-looking way to work.
             nf_queued = lambda row : row['status'].ne(Status.DONE).and_(row['status'].ne(Status.ERROR))
+            # Order by effective priority followed by FIFO.
+            nf_order = [r.row['priority'] + r.row['tries'], r.row['queued_at']]
             indexes = [
                 # --- Simple indexes
                 # Allow filtering by item name
                 ("item",),
-                # Allow filtering by stash
-                ("stash",),
 
                 # --- Compound indexes
                 # True if the item is NOT in done or error.
                 ("nf_queued", nf_queued),
-                # Chonker of an index to filter by status and type, and order by priority and FIFO.
-                ("nf_order", [r.row['status'], r.row['pipeline_type'], r.row['run_on'], r.row['priority'] + r.row['tries'], r.row['queued_at']]),
+                # Chonker of an index to filter by status and pipeline type, while still being able to order.
+                ("nf_order", [r.row['status'], r.row['pipeline_type'], r.row['run_on']] + nf_order),
+                # TODO: Figure out a way to get rid of this.
+                # It's necessary because if you don't use pipeline_type or run_on in the
+                # nf_order index, the regular order will be ignored because they come first.
+                # Because between uses lexographical sorting, we can't put the real order first
+                # as it will short-circuit the actual filters away.
+                # I don't know how expensive an additional index is, but less is probably better.
+                ("nf_order_only", [r.row['status']] + nf_order),
                 # Item status and time last claimed.
                 ("nf_status", [r.row['status'], r.row['claimed_at'], r.row['claimed_by']]),
+                # None if it is not in todo to save space.
+                # This over [r.row['status'], r.row['stash']] so done isn't a part of it.
+                ("nf_was_stashed", r.branch(r.row['status'] == Status.TODO, r.row['stash'], None)),
                 # Item parent and nf_queued
                 ("nf_parent", lambda row : [row['parent_item'], nf_queued(row)]),
             ]
@@ -329,31 +339,34 @@ class Queue:
 
             return action_plan
 
-    def _fifo(self, status: Status, for_who: typing.Optional[str], ptmin, ptmax):
-        if for_who is None:
-            fwmin, fwmax = r.minval, r.maxval
-        else:
-            fwmin, fwmax = for_who, for_who
+    def _fifo(self, status: Status, for_who: str, pipeline_type: str):
         return (
             self._queue()
             # You can only use one secondary index at a time, so we use a chonker of an
             # index that includes status, type, priority, and timestamp.
             # This allows us to filter the output and add FIFO, all with the same index.
             .between(
-                [status, ptmin, fwmin, r.minval, r.minval],
-                [status, ptmax, fwmax, r.maxval, r.maxval],
+                [status, pipeline_type, for_who, r.minval, r.minval],
+                [status, pipeline_type, for_who, r.maxval, r.maxval],
                 index="nf_order"
             )
             .order_by(index="nf_order")
         )
 
-    async def _claim(self, conn, by_who: str, for_who: str, pipeline_type: typing.Optional[str]) -> Entry | None:
-        if pipeline_type is None:
-            ptmin, ptmax = r.minval, r.maxval
-        else:
-            ptmin, ptmax = pipeline_type, pipeline_type
+    def _fifo_all(self, status: Status):
+        return (
+            self._queue()
+            .between(
+                [status, r.minval, r.minval],
+                [status, r.maxval, r.maxval],
+                index = "nf_order_only"
+            )
+            .order_by(index = "nf_order_only")
+        )
+
+    async def _claim(self, conn, by_who: str, for_who: str, pipeline_type: str) -> Entry | None:
         rv = await (
-            self._fifo(Status.TODO, for_who, ptmin, ptmax)
+            self._fifo(Status.TODO, for_who, pipeline_type)
             .limit(1)
             .update(
                 # https://rethinkdb.com/docs/consistency/
@@ -378,22 +391,19 @@ class Queue:
         assert rv['replaced'] == 1 and rv['errors'] == 0
         return Entry._from_dict(rv['changes'][0]['new_val'])
 
-    async def claim(self, by_who: str, pipeline_type: typing.Optional[str] = None) -> Entry | None:
+    async def claim(self, by_who: str, pipeline_type: str) -> Entry | None:
         """
         Tries to claim a job from the database.
 
         Atempts to dequeue from the pipeline-specific queue first (where run_on = by_who),
         and only try the general queue when no item is found.
 
-        If pipeline_type is non-null, all pipeline types are accepted.
-
         Returns the item, or None if none can be found. Future circumstances, such as ratelimiting,
         may be handled by raising subclasses of NoItemServes.
         """
         self._ensure_setup()
         async with connect() as conn:
-            # Try to dequeue from pipeline-specific queue first, then
-            # try the general queue
+            # Try to dequeue from pipeline-specific queue first, then try the general queue
             return await self._claim(conn, by_who, by_who, pipeline_type) \
                 or await self._claim(conn, by_who, "", pipeline_type)
 
@@ -406,7 +416,7 @@ class Queue:
         general = []
         async with connect() as conn:
             gen = await (
-                self._fifo(Status.TODO, None, r.minval, r.maxval)
+                self._fifo_all(Status.TODO)
                 .run(conn)
             )
             async for entry in gen:
@@ -451,12 +461,13 @@ class Queue:
                 return Entry._from_dict(e)
             return None
 
-    async def new(self, item: str, pipeline_type: str, queued_by: str, expires: typing.Optional[Seconds] = None, priority: int = 0, metadata: typing.Optional[dict] = None, explanation: typing.Optional[str] = None) -> Entry:
+    async def new(self, item: str, pipeline_type: str, queued_by: str, expires: typing.Optional[Seconds] = None, priority: int = 0, metadata: typing.Optional[dict] = None, explanation: typing.Optional[str] = None, stash: typing.Optional[str] = None) -> Entry:
         """
         Creates a new job and adds it to the database.
+        If stash is non-null, the item will be stashed; otherwise, it will be added to todo.
         """
         self._ensure_setup()
-        return await Entry._new(self.database_name, self.table_name, item, pipeline_type, queued_by, expires, priority, metadata, explanation)
+        return await Entry._new(self.database_name, self.table_name, item, pipeline_type, queued_by, expires, priority, metadata, explanation, stash)
 
     def _limbo(self, grace = 86400):
         self._ensure_setup()
@@ -691,6 +702,8 @@ class Queue:
         THIS IS NOT ATOMIC. If you run this twice at the same time, even in another process,
         rue will dripfeed too many items. Either use a lock, or ensure it is only being called
         once at a time.
+        It's recommended to do this in a separate task, as it may take some time with a lot
+        of stashed items.
         """
         fin = []
         async with connect() as conn:
@@ -700,11 +713,11 @@ class Queue:
                 .filter(r.row['concurrency'] > 0)
                 .run(conn)
             )
-            for stash in eligible_stashes:
+            async for stash in eligible_stashes:
                 stash, concurrency = stash['name'], stash['concurrency']
                 num_items = await (
                     self._queue()
-                    .get_all(stash, index = "stash")
+                    .get_all(stash, index = "nf_was_stashed")
                     .count()
                     .run(conn)
                 )
@@ -712,11 +725,11 @@ class Queue:
                 if difference > 0:
                     res = await (
                         # Save the last items for last
-                        self._fifo(Status.STASHED, None, r.minval, r.maxval)
+                        self._fifo_all(Status.STASHED)
                         .filter({"stash": stash})
                         .limit(difference)
                         .update(r.branch(
-                            lambda row : row['status'] == Status.STASHED and row['stash'] == stash,
+                            r.row['status'].eq(Status.STASHED).and_(r.row['stash'] == stash),
                             {"status": Status.TODO},
                             {}
                         ), return_changes = True)

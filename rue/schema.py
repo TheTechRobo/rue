@@ -103,7 +103,7 @@ class Entry:
         return Entry(**d)
 
     @staticmethod
-    async def _new(database_name: str, table_name: str, item: str, pipeline_type: str, queued_by: str, expires: typing.Optional[Seconds] = None, priority: int = 0, metadata: typing.Optional[dict] = None, explanation: str | None = None):
+    async def _new(database_name: str, table_name: str, item: str, pipeline_type: str, queued_by: str, expires: typing.Optional[Seconds] = None, priority: int = 0, metadata: typing.Optional[dict] = None, explanation: str | None = None, stash: str | None = None):
         if metadata is None:
             metadata = {}
         d = Entry(
@@ -111,12 +111,13 @@ class Entry:
             item = item,
             queued_by = queued_by,
             expires = r.now() + expires if isinstance(expires, _Seconds) else expires, # What the type system doesn't know won't hurt it.
-            status = Status.TODO,
+            status = Status.STASHED if stash else Status.TODO,
             queued_at = r.now(),
             priority = priority,
             pipeline_type = pipeline_type,
             metadata = metadata,
-            explanation = explanation
+            explanation = explanation,
+            stash = stash
         )
         async with connect() as conn:
             res = await (

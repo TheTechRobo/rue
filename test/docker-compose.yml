@@ -1,0 +1,17 @@
+services:
+  rethinkdb:
+    image: rethinkdb:latest
+    volumes:
+      - type: tmpfs
+        target: /data
+        tmpfs:
+          size: 104900000
+  test:
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: $PYTHON_VERSION
+    volumes:
+      - "$PWD/../rue:/app/rue"
+    environment:
+      RUE_DB_HOST: "rethinkdb"
