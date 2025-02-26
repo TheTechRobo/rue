@@ -51,7 +51,10 @@ async def main():
         ("me", "boring_pipeline")
     )
     for a in args:
-        real.append(await queue.claim(*a))
+        res = await queue.claim(*a)
+        if res:
+            assert res.claimed_at is not None
+        real.append(res)
     assert mid(expected) == mid(real), mit(real)
 
     # Do results work correctly?

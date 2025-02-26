@@ -382,6 +382,7 @@ class Queue:
                     {
                         "status": str(Status.CLAIMED),
                         "claimed_by": by_who,
+                        "claimed_at": r.now(),
                         "tries": r.row['tries'] + 1
                     },
                     {}
