@@ -28,6 +28,8 @@ async def main():
     it3 = await queue.new("it3", "cool_pipeline", "me")
     it4 = await queue.new("it4", "boring_pipeline", "me")
 
+    assert it4.attempts == []
+
     # Does pending work correctly?
     pending = await queue.pending()
     assert mid(pending) == mid([it1, it3, it4, it2]), mit(pending)
@@ -58,7 +60,7 @@ async def main():
     assert mid(expected) == mid(real), mit(real)
 
     # Do results work correctly?
-    await queue.store_result(it4, it4.claimed_by, it4.tries, {"HI": True}, "type")
+    await queue.store_result(it4, it4.attempt_number(), {"HI": True}, "type")
     l: list[rue.JobResult] = []
     async for result in queue.get_results(it4):
         l.append(result)
@@ -66,13 +68,18 @@ async def main():
     assert l[0].type == "type" and l[0].data['HI'] is True, l
 
     # maxtries is 2, so first failure should requeue
-    r1 = await queue.fail(it4, "Too boring")
+    r1 = await queue.fail(it4, "Too boring", 0)
+    assert r1.attempt_number() == 0
+    attempt = r1.attempts[r1.attempt_number()]
+    assert attempt.error == "Too boring"
+    assert attempt.pipeline == "me"
+    assert attempt.poke_reason is None
     assert r1.status == rue.Status.TODO, r1
     # claim again so that try counter is increased
     it4_new = await queue.claim("me", "boring_pipeline")
     assert it4_new and it4_new.id == it4.id, it4_new
     # second failure should move to error
-    r2 = await queue.fail(it4, "Too boring")
+    r2 = await queue.fail(it4, "Too boring", len(it4_new.attempts) - 1)
     assert r2.status == rue.Status.ERROR, r2
     # and finishing should work nonetheless
     assert (await queue.finish(it4)).status == rue.Status.DONE

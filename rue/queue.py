@@ -93,7 +93,7 @@ class DefaultOptions:
     max_tries: int = 0
 
 QueueStatus = collections.namedtuple("QueueStatus", ["counts", "limbo"])
-JobResult = collections.namedtuple("JobResult", ["id", "item", "type", "data", "tries", "pipeline"])
+JobResult = collections.namedtuple("JobResult", ["id", "item", "type", "data", "attempt"])
 DripfeedBehaviour = collections.namedtuple("DripfeedBehaviour", ["concurrency"])
 HeartbeatData = collections.namedtuple("HeartbeatData", ["last_seen"])
 
@@ -270,11 +270,10 @@ class Queue:
 
             # Main queue table
 
-            # "Why'd you write it like this?" Because I wasted a good 10 minutes of my time
-            # trying to get the nicer-looking way to work.
+            tries = r.row['attempts'].count()
             nf_queued = lambda row : row['status'].ne(Status.DONE).and_(row['status'].ne(Status.ERROR))
             # Order by effective priority followed by FIFO.
-            nf_order = [r.row['priority'] + r.row['tries'], r.row['queued_at']]
+            nf_order = [r.row['priority'] + tries, r.row['queued_at']]
 
             # Allows us to save on index space usage by pruning finished items from the index
             # done is going to eventually get large, so keeping it out of the index is a good idea.
@@ -371,6 +370,7 @@ class Queue:
         )
 
     async def _claim(self, conn, by_who: str, for_who: str, pipeline_type: str) -> Entry | None:
+        new_attempt = Attempt(pipeline = by_who).as_dict()
         rv = await (
             self._fifo(Status.TODO, for_who, pipeline_type)
             .limit(1)
@@ -381,12 +381,11 @@ class Queue:
                     r.row['status'] == str(Status.TODO),
                     {
                         "status": str(Status.CLAIMED),
-                        "claimed_by": by_who,
                         "claimed_at": r.now(),
-                        "tries": r.row['tries'] + 1
+                        "attempts": r.row['attempts'].append(new_attempt)
                     },
                     {}
-                ), return_changes=True
+                ), return_changes = True
             )
             .run(conn)
         )
@@ -532,16 +531,16 @@ class Queue:
             reorganized[ci['pipeline_type']] = baseline | d
         return QueueStatus(reorganized, in_limbo)
 
-    async def store_result(self, item: Entry, from_pipeline: str, tries: int, data: dict[str, typing.Any], result_type: str) -> str:
+    async def store_result(self, item: Entry, current_attempt: int, data: dict[str, typing.Any], result_type: str) -> str:
         """
         Stores the result of an item in the results table.
 
         item must have an associated ID. (It must have been saved in the database at some point.)
         data must be JSON-serializable.
 
-        Why must from_pipeline and tries be provided, you ask? Well, because if you are using
-        e.g. reclaiming, the Entry's current values may be inaccurate. If you know you aren't,
-        you may take the values from `item`.
+        Why must current_attempt be provided, you ask? Well, because if you are using e.g. reclaiming,
+        the Entry's current values may be inaccurate. If you know you aren't, you may take
+        the values from `item`.
 
         Returns the primary key of the stored result.
         """
@@ -555,8 +554,7 @@ class Queue:
                     "item": item.id,
                     "data": data,
                     "type": result_type,
-                    "try": tries,
-                    "pipeline": from_pipeline
+                    "try": current_attempt
                 })
                 .run(conn)
             )
@@ -585,60 +583,57 @@ class Queue:
                     item = entry['item'],
                     type = entry['type'],
                     data = entry['data'],
-                    tries = entry['try'],
-                    pipeline = entry['pipeline']
+                    attempt = entry['try']
                 )
 
-    async def fail(self, item: Entry, reason: str) -> Entry:
+    async def fail(self, item: Entry, reason: str, current_attempt: int, is_poke: bool = False) -> Entry:
         """
         Fails an item.
 
-        If item.tries >= max_tries, its status will be set to ERROR. Otherwise, it will
+        If len(item.attempts) >= max_tries, its status will be set to ERROR. Otherwise, it will
         be moved back to TODO.
+
+        See store_result for why current_attempt must be provided.
+
+        If is_poke is True, the failure message will be stored under poke_reason rather than error.
+        This is so that error messages aren't lost by admin wizardry.
 
         Returns a new Entry object.
         """
         self._ensure_setup()
         if item.id is None:
             raise TypeError("Item does not have an identifier")
+        if current_attempt < 0:
+            raise ValueError("current_attempt must be positive")
+        reason_key = "poke_reason" if is_poke else "error"
+        new_attempts = r.row['attempts'].change_at(
+            current_attempt,
+            r.row['attempts'][current_attempt].merge({reason_key: reason})
+        )
         async with connect() as conn:
             max_tries = await self.options.max_tries()
             res = await (
                 self._queue()
                 .get(item.id)
                 .update(
+                    # set error reason and maybe update status
                     r.branch(
-                        # if tries > max_tries...
-                        r.row['tries'] >= max_tries,
+                        # if tries >= max_tries...
+                        r.row['attempts'].count() >= max_tries,
                         r.branch(
                             # Allows everything except done in case items get reclaimed or
                             # something while the pipeline still has it
                             r.row['status'] != Status.DONE,
-                            # set status to error and add error reason
-                            {
-                                "status": Status.ERROR,
-                                "error_reasons": r.row['error_reasons'].append(reason)
-                            },
-                            {
-                                # If the item is finished, don't step on their toes, but
-                                # do add the error reason anyway
-                                "error_reasons": r.row['error_reasons'].append(reason)
-                            }
+                            {"status": Status.ERROR, "attempts": new_attempts},
+                            {"attempts": new_attempts}
                         ),
                         # else...
                         r.branch(
-                            # still no toe-stepping if someone else finished the item
                             r.row['status'] != Status.DONE,
-                            # set status to todo and add error reason
-                            {
-                                "status": Status.TODO,
-                                "error_reasons": r.row['error_reasons'].append(reason)
-                            },
-                            {
-                                "error_reasons": r.row['error_reasons'].append(reason)
-                            }
-                        ),
-                    ), return_changes=True
+                            {"status": Status.TODO, "attempts": new_attempts},
+                            {"attempts": new_attempts}
+                        )
+                    ), return_changes = True
                 )
                 .run(conn)
             )
