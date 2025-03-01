@@ -125,8 +125,17 @@ class Entry:
     metadata: dict = dataclasses.field(default_factory = dict)
     """Arbitrary metadata for the job."""
 
-    def attempt_number(self) -> int:
+    def current_attempt(self) -> int:
+        """
+        Returns the index of the latest attempt. -1 if the item has not been tried yet.
+        """
         return len(self.attempts) - 1
+
+    def attempt_count(self) -> int:
+        """
+        Returns the number of attempts.
+        """
+        return len(self.attempts)
 
     @staticmethod
     def _from_dict(d):

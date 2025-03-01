@@ -120,6 +120,7 @@ class Queue:
         queue_table_name: Table to store the queue in.
         results_table_name: Table to store job results from store_result() in.
         metadata_table_name: Table to store control information, like rate-limits, DB version, etc.
+        heartbeat_table_name: Table to store heartbeats from pipelines.
         """
         self.database_name = database_name
         self.table_name = queue_table_name
@@ -538,15 +539,17 @@ class Queue:
         item must have an associated ID. (It must have been saved in the database at some point.)
         data must be JSON-serializable.
 
-        Why must current_attempt be provided, you ask? Well, because if you are using e.g. reclaiming,
-        the Entry's current values may be inaccurate. If you know you aren't, you may take
-        the values from `item`.
+        current_attempt must be provided in case multiple pipelines are working on a task simultaneously.
+        This could occur because of requeuing, reclaiming, etc. If you know this isn't a problem, you may
+        use `item.current_attempt()`.
 
         Returns the primary key of the stored result.
         """
         self._ensure_setup()
         if item.id is None:
             raise TypeError("Item does not have an identifier")
+        if current_attempt < 0:
+            raise ValueError(f"Attempt index {current_attempt} is negative")
         async with connect() as conn:
             res = await (
                 self._results()
@@ -564,7 +567,7 @@ class Queue:
 
     async def get_results(self, item: Entry) -> collections.abc.AsyncGenerator[JobResult]:
         """
-        Gets the job results for a given item.
+        Gets the job results for a given item. They may be out of order.
 
         item must have an associated ID. (It must have been saved to the database at one point.)
         """
@@ -756,7 +759,7 @@ class Queue:
                 self._heartbeat()
                 .insert({
                     "id": pipeline,
-                    "last_seen": time.time()
+                    "last_seen": r.now()
                 }, conflict = "replace")
                 .run(conn)
             )
@@ -770,7 +773,12 @@ class Queue:
             )
             return HeartbeatData(last_seen = res['last_seen'])
 
-    async def change_explanation(self, item: Entry, new_explanation: str):
+    async def change_explanation(self, item: Entry, new_explanation: str) -> Entry:
+        """
+        Changes the explanation for an item. The item must have an associated ID.
+
+        Returns the new item.
+        """
         if item.id is None:
             raise TypeError("Item does not have an identifier")
         async with connect() as conn:

@@ -60,17 +60,18 @@ async def main():
     assert mid(expected) == mid(real), mit(real)
 
     # Do results work correctly?
-    await queue.store_result(it4, it4.attempt_number(), {"HI": True}, "type")
+    await queue.store_result(it4, 0, {"foo": "bar"}, "type")
     l: list[rue.JobResult] = []
     async for result in queue.get_results(it4):
         l.append(result)
     assert len(l) == 1, l
-    assert l[0].type == "type" and l[0].data['HI'] is True, l
+    assert l[0].type == "type" and l[0].data['foo'] == "bar", l
 
     # maxtries is 2, so first failure should requeue
     r1 = await queue.fail(it4, "Too boring", 0)
-    assert r1.attempt_number() == 0
-    attempt = r1.attempts[r1.attempt_number()]
+    assert r1.current_attempt() == 0
+    assert r1.attempt_count() == 1
+    attempt = r1.attempts[r1.current_attempt()]
     assert attempt.error == "Too boring"
     assert attempt.pipeline == "me"
     assert attempt.poke_reason is None
@@ -79,9 +80,9 @@ async def main():
     # claim again so that try counter is increased
     it4_new = await queue.claim("me", "boring_pipeline", "1.0")
     assert it4_new and it4_new.id == it4.id, it4_new
-    assert it4_new.attempts[it4_new.attempt_number()].pipeline_version == "1.0"
+    assert it4_new.attempts[it4_new.current_attempt()].pipeline_version == "1.0"
     # second failure should move to error
-    r2 = await queue.fail(it4, "Too boring", len(it4_new.attempts) - 1)
+    r2 = await queue.fail(it4, "Too boring", it4_new.current_attempt())
     assert r2.status == rue.Status.ERROR, r2
     # and finishing should work nonetheless
     assert (await queue.finish(it4)).status == rue.Status.DONE
