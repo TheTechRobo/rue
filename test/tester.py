@@ -74,10 +74,12 @@ async def main():
     assert attempt.error == "Too boring"
     assert attempt.pipeline == "me"
     assert attempt.poke_reason is None
+    assert attempt.pipeline_version is None
     assert r1.status == rue.Status.TODO, r1
     # claim again so that try counter is increased
-    it4_new = await queue.claim("me", "boring_pipeline")
+    it4_new = await queue.claim("me", "boring_pipeline", "1.0")
     assert it4_new and it4_new.id == it4.id, it4_new
+    assert it4_new.attempts[it4_new.attempt_number()].pipeline_version == "1.0"
     # second failure should move to error
     r2 = await queue.fail(it4, "Too boring", len(it4_new.attempts) - 1)
     assert r2.status == rue.Status.ERROR, r2

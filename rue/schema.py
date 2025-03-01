@@ -42,8 +42,15 @@ class Attempt:
     poke_reason: typing.Optional[str] = None
     """Reason for admin poke (abort or manual reclaim), if any."""
 
+    pipeline_version: typing.Optional[str] = None
+    """The version of the pipeline. Can be any format of string; rue does not care about the value."""
+
     @staticmethod
     def _from_dict(d):
+        d = copy.copy(d)
+        if ver := d.get("ver"):
+            d['pipeline_version'] = ver
+            del d['ver']
         return Attempt(**d)
 
     def as_dict(self):
@@ -53,6 +60,9 @@ class Attempt:
             del rv['error']
         if not rv['poke_reason']:
             del rv['poke_reason']
+        if pv := rv['pipeline_version']:
+            rv['ver'] = pv
+        del rv['pipeline_version']
         return rv
 
 @dataclasses.dataclass(frozen = True)

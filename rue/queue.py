@@ -369,8 +369,8 @@ class Queue:
             .order_by(index = "nf_order_only")
         )
 
-    async def _claim(self, conn, by_who: str, for_who: str, pipeline_type: str) -> Entry | None:
-        new_attempt = Attempt(pipeline = by_who).as_dict()
+    async def _claim(self, conn, by_who: str, for_who: str, pipeline_type: str, pipeline_version: str | None) -> Entry | None:
+        new_attempt = Attempt(pipeline = by_who, pipeline_version = pipeline_version).as_dict()
         rv = await (
             self._fifo(Status.TODO, for_who, pipeline_type)
             .limit(1)
@@ -397,7 +397,7 @@ class Queue:
         assert rv['replaced'] == 1 and rv['errors'] == 0
         return Entry._from_dict(rv['changes'][0]['new_val'])
 
-    async def claim(self, by_who: str, pipeline_type: str) -> Entry | None:
+    async def claim(self, by_who: str, pipeline_type: str, pipeline_version: typing.Optional[str] = None) -> Entry | None:
         """
         Tries to claim a job from the database.
 
@@ -410,8 +410,8 @@ class Queue:
         self._ensure_setup()
         async with connect() as conn:
             # Try to dequeue from pipeline-specific queue first, then try the general queue
-            return await self._claim(conn, by_who, by_who, pipeline_type) \
-                or await self._claim(conn, by_who, "", pipeline_type)
+            return await self._claim(conn, by_who, by_who, pipeline_type, pipeline_version) \
+                or await self._claim(conn, by_who, "", pipeline_type, pipeline_version)
 
     async def pending(self) -> list[Entry]:
         """
