@@ -272,6 +272,12 @@ class Queue:
             # Main queue table
 
             tries = r.row['attempts'].count()
+            claimed_by = r.row['attempts'].count().gt(0).branch(
+                # if attempt count > 0, store pipeline that last claimed it
+                r.row['attempts'][-1]['pipeline'],
+                # otherwise, store null
+                None,
+            )
             nf_queued = lambda row : row['status'].ne(Status.DONE).and_(row['status'].ne(Status.ERROR))
             # Order by effective priority followed by FIFO.
             nf_order = [r.row['priority'] + tries, r.row['queued_at']]
@@ -299,7 +305,7 @@ class Queue:
                 # With no_done, it's probably not a huge issue, but it's still ugly.
                 ("nf_order_only", no_done([r.row['status']] + nf_order)),
                 # Item status and time last claimed.
-                ("nf_status", [r.row['status'], r.row['claimed_at'], r.row['claimed_by']]),
+                ("nf_status", no_done([r.row['status'], r.row['claimed_at'], claimed_by])),
                 # None if it is not in todo to save space.
                 # This over [r.row['status'], r.row['stash']] so done isn't a part of it.
                 ("nf_was_stashed", r.branch(r.row['status'] == Status.TODO, r.row['stash'], None)),
