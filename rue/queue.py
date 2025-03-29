@@ -595,6 +595,27 @@ class Queue:
                     attempt = entry['try']
                 )
 
+    async def get_result(self, result_id: str) -> JobResult | None:
+        """
+        Gets a specific result by ID from the database.
+        """
+        async with connect() as conn:
+            res = await (
+                self._results()
+                .get(result_id)
+                .run(conn)
+            )
+            if not res:
+                return None
+
+        return JobResult(
+            id = res['id'],
+            item = res['item'],
+            type = res['type'],
+            data = res['data'],
+            attempt = res['try']
+        )
+
     async def fail(self, item: Entry, reason: str, current_attempt: int, is_poke: bool = False) -> Entry:
         """
         Fails an item.
