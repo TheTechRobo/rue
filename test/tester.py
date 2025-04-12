@@ -106,7 +106,7 @@ async def main():
     # Claim dri
     dri = await queue.claim("me", "cool_pipeline")
     # Make sure that allow_retries = False works
-    ndri = await queue.fail(dri, "Failed", 0, False)
+    ndri = await queue.fail(dri, "Failed", 0, rue.RetryBehaviour.NEVER)
     assert ndri.status == rue.Status.ERROR
 
     # Make sure we get the new item in the queue

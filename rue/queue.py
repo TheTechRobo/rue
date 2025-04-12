@@ -1,7 +1,7 @@
 import collections.abc
 import dataclasses
+import enum
 import typing
-import time
 
 from .rethinkdb import *
 from .exceptions import *
@@ -12,7 +12,8 @@ __all__ = [
     "QueueStatus",
     "JobResult",
     "Queue",
-    "DefaultOptions"
+    "DefaultOptions",
+    "RetryBehaviour"
 ]
 
 DbCreate = collections.namedtuple("DbCreate", ("name",))
@@ -91,6 +92,16 @@ class RueOptions:
 @dataclasses.dataclass
 class DefaultOptions:
     max_tries: int = 0
+
+class RetryBehaviour(enum.Enum):
+    DEFAULT = 0
+    """Default behaviour: retry if max_tries has not been reached."""
+
+    NEVER = 1
+    """Never retry."""
+
+    FORCE = 2
+    """Always retry."""
 
 QueueStatus = collections.namedtuple("QueueStatus", ["counts", "limbo"])
 JobResult = collections.namedtuple("JobResult", ["id", "item", "type", "data", "attempt"])
@@ -616,7 +627,7 @@ class Queue:
             attempt = res['try']
         )
 
-    async def fail(self, item: Entry, reason: str, current_attempt: int, allow_retries: bool = True, is_poke: bool = False) -> Entry:
+    async def fail(self, item: Entry, reason: str, current_attempt: int, retry_behaviour: RetryBehaviour = RetryBehaviour.DEFAULT, is_poke: bool = False) -> Entry:
         """
         Fails an item.
 
@@ -643,10 +654,13 @@ class Queue:
             r.row['attempts'][current_attempt].merge({reason_key: reason})
         )
         async with connect() as conn:
-            if allow_retries:
-                max_tries = await self.options.max_tries()
-            else:
-                max_tries = 0
+            match retry_behaviour:
+                case RetryBehaviour.DEFAULT:
+                    max_tries = await self.options.max_tries()
+                case RetryBehaviour.NEVER:
+                    max_tries = 0
+                case RetryBehaviour.FORCE:
+                    max_tries = 1_000_000
             res = await (
                 self._queue()
                 .get(item.id)
