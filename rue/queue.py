@@ -616,7 +616,7 @@ class Queue:
             attempt = res['try']
         )
 
-    async def fail(self, item: Entry, reason: str, current_attempt: int, is_poke: bool = False) -> Entry:
+    async def fail(self, item: Entry, reason: str, current_attempt: int, allow_retries: bool = True, is_poke: bool = False) -> Entry:
         """
         Fails an item.
 
@@ -624,6 +624,8 @@ class Queue:
         be moved back to TODO.
 
         See store_result for why current_attempt must be provided.
+
+        if allow_retries is False, rue will not retry the item, even if it has not yet reached max_tries.
 
         If is_poke is True, the failure message will be stored under poke_reason rather than error.
         This is so that error messages aren't lost by admin wizardry.
@@ -641,7 +643,10 @@ class Queue:
             r.row['attempts'][current_attempt].merge({reason_key: reason})
         )
         async with connect() as conn:
-            max_tries = await self.options.max_tries()
+            if allow_retries:
+                max_tries = await self.options.max_tries()
+            else:
+                max_tries = 0
             res = await (
                 self._queue()
                 .get(item.id)
