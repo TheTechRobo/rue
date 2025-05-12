@@ -57,6 +57,11 @@ class Poke:
             del d['reason']
         return d
 
+    def as_json_friendly_dict(self):
+        d = self.as_dict()
+        if self.time:
+            d['time'] = self.time.timestamp()
+
 @dataclasses.dataclass(frozen = True)
 class Attempt:
     pipeline: str
@@ -88,6 +93,11 @@ class Attempt:
             rv['ver'] = pv
         del rv['pipeline_version']
         return rv
+
+    def as_json_friendly_dict(self):
+        d = self.as_dict()
+        if self.time:
+            d['time'] = self.time.timestamp()
 
 @dataclasses.dataclass(frozen = True)
 class Entry:
@@ -216,6 +226,6 @@ class Entry:
         d['queued_at'] = self.queued_at.timestamp()
         if self.claimed_at is not None: d['claimed_at'] = self.claimed_at.timestamp()
         if self.finished_at is not None: d['finished_at'] = self.finished_at.timestamp()
-        d['attempts'] = [i.as_dict() for i in self.attempts]
-        d['admin_log'] = [i.as_dict() for i in self.admin_log]
+        d['attempts'] = [i.as_json_friendly_dict() for i in self.attempts]
+        d['admin_log'] = [i.as_json_friendly_dict() for i in self.admin_log]
         return d
