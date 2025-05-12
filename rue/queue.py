@@ -388,7 +388,11 @@ class Queue:
         )
 
     async def _claim(self, conn, by_who: str, for_who: str, pipeline_type: str, pipeline_version: str | None) -> Entry | None:
-        new_attempt = Attempt(pipeline = by_who, pipeline_version = pipeline_version).as_dict()
+        new_attempt = Attempt(
+            pipeline = by_who,
+            pipeline_version = pipeline_version,
+            time = r.now()
+        ).as_dict()
         rv = await (
             self._fifo(Status.TODO, for_who, pipeline_type)
             .limit(1)
@@ -627,7 +631,7 @@ class Queue:
             attempt = res['try']
         )
 
-    async def fail(self, item: Entry, reason: str, current_attempt: int, retry_behaviour: RetryBehaviour = RetryBehaviour.DEFAULT, is_poke: bool = False) -> Entry:
+    async def fail(self, item: Entry, reason: str, current_attempt: AttemptId, retry_behaviour: RetryBehaviour = RetryBehaviour.DEFAULT, is_poke: bool = False) -> Entry:
         """
         Fails an item.
 
@@ -638,8 +642,7 @@ class Queue:
 
         if allow_retries is False, rue will not retry the item, even if it has not yet reached max_tries.
 
-        If is_poke is True, the failure message will be stored under poke_reason rather than error.
-        This is so that error messages aren't lost by admin wizardry.
+        If is_poke is True, the failure message will be stored under a new admin_log entry rather than error.
 
         Returns a new Entry object.
         """
@@ -648,11 +651,14 @@ class Queue:
             raise TypeError("Item does not have an identifier")
         if current_attempt < 0:
             raise ValueError("current_attempt must be positive")
-        reason_key = "poke_reason" if is_poke else "error"
-        new_attempts = r.row['attempts'].change_at(
-            current_attempt,
-            r.row['attempts'][current_attempt].merge({reason_key: reason})
-        )
+        if is_poke:
+            log = Poke(time = r.now(), action = ("fail", current_attempt), reason = reason)
+            merger = {"admin_log": r.row['admin_log'].append(log.as_dict())}
+        else:
+            merger = {"attempts": r.row['attempts'].change_at(
+                current_attempt,
+                r.row['attempts'][current_attempt].merge({"error": reason})
+            )}
         async with connect() as conn:
             match retry_behaviour:
                 case RetryBehaviour.DEFAULT:
@@ -673,14 +679,14 @@ class Queue:
                             # Allows everything except done in case items get reclaimed or
                             # something while the pipeline still has it
                             r.row['status'] != Status.DONE,
-                            {"status": Status.ERROR, "attempts": new_attempts},
-                            {"attempts": new_attempts}
+                            {"status": Status.ERROR} | merger,
+                            merger
                         ),
                         # else...
                         r.branch(
                             r.row['status'] != Status.DONE,
-                            {"status": Status.TODO, "attempts": new_attempts},
-                            {"attempts": new_attempts}
+                            {"status": Status.TODO} | merger,
+                            merger
                         )
                     ), return_changes = True
                 )

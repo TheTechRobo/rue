@@ -14,7 +14,9 @@ __all__ = [
     "Seconds",
     "Expiry",
     "Entry",
-    "Attempt"
+    "Attempt",
+    "AttemptId",
+    "Poke"
 ]
 
 Id = typing.NewType("Id", str)
@@ -30,6 +32,30 @@ _Seconds = int
 Seconds = typing.NewType("Seconds", _Seconds)
 # If datetime, the time it expires. If 'never', never expires. If None, no limitation.
 Expiry = datetime.datetime | typing.Literal['never'] | None
+AttemptId = typing.NewType("AttemptId", int)
+
+@dataclasses.dataclass(frozen = True)
+class Poke:
+    time: datetime.datetime
+    """The time of the action."""
+
+    action: tuple[str, typing.Optional[AttemptId]]
+    """The action being logged."""
+
+    reason: typing.Optional[str] = None
+    """The reason for the action."""
+
+    @classmethod
+    def _from_dict(cls, d):
+        d = copy.copy(d)
+        d['action'] = tuple(d['action'])
+        return cls(**d)
+
+    def as_dict(self):
+        d = dataclasses.asdict(self)
+        if not self.reason:
+            del d['reason']
+        return d
 
 @dataclasses.dataclass(frozen = True)
 class Attempt:
@@ -39,27 +65,25 @@ class Attempt:
     error: typing.Optional[str] = None
     """The error encountered on this attempt, if any."""
 
-    poke_reason: typing.Optional[str] = None
-    """Reason for admin poke (abort or manual reclaim), if any."""
-
     pipeline_version: typing.Optional[str] = None
     """The version of the pipeline. Can be any format of string; rue does not care about the value."""
 
-    @staticmethod
-    def _from_dict(d):
+    time: typing.Optional[datetime.datetime] = None
+    """The time the attempt was started."""
+
+    @classmethod
+    def _from_dict(cls, d):
         d = copy.copy(d)
         if ver := d.get("ver"):
             d['pipeline_version'] = ver
             del d['ver']
-        return Attempt(**d)
+        return cls(**d)
 
     def as_dict(self):
         rv = dataclasses.asdict(self)
         # Don't include error field if there was no error, to save space
         if not rv['error']:
             del rv['error']
-        if not rv['poke_reason']:
-            del rv['poke_reason']
         if pv := rv['pipeline_version']:
             rv['ver'] = pv
         del rv['pipeline_version']
@@ -122,26 +146,30 @@ class Entry:
     stash: typing.Optional[str] = None
     """If the item is in a stash, which stash? (A dripfed item is still considered in the stash.)"""
 
+    admin_log: list[Poke] = dataclasses.field(default_factory = list)
+    """Record of changes made to the item. Some operations can optionally add to this."""
+
     metadata: dict = dataclasses.field(default_factory = dict)
     """Arbitrary metadata for the job."""
 
-    def current_attempt(self) -> int:
+    def current_attempt(self) -> AttemptId:
         """
         Returns the index of the latest attempt. -1 if the item has not been tried yet.
         """
-        return len(self.attempts) - 1
+        return AttemptId(len(self.attempts) - 1)
 
-    def attempt_count(self) -> int:
+    def attempt_count(self) -> AttemptId:
         """
         Returns the number of attempts.
         """
-        return len(self.attempts)
+        return AttemptId(len(self.attempts))
 
     @staticmethod
     def _from_dict(d):
         d = copy.copy(d)
         d['status'] = Status(d['status'])
         d['attempts'] = [Attempt._from_dict(attempt) for attempt in d['attempts']]
+        d['admin_log'] = [Poke._from_dict(poke) for poke in d.get("admin_log", [])]
         return Entry(**d)
 
     @staticmethod
@@ -189,4 +217,5 @@ class Entry:
         if self.claimed_at is not None: d['claimed_at'] = self.claimed_at.timestamp()
         if self.finished_at is not None: d['finished_at'] = self.finished_at.timestamp()
         d['attempts'] = [i.as_dict() for i in self.attempts]
+        d['admin_log'] = [i.as_dict() for i in self.admin_log]
         return d

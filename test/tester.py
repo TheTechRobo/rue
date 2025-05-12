@@ -68,13 +68,13 @@ async def main():
     assert l[0].type == "type" and l[0].data['foo'] == "bar", l
 
     # maxtries is 2, so first failure should requeue
-    r1 = await queue.fail(it4, "Too boring", 0)
+    r1 = await queue.fail(it4, "Too boring", rue.AttemptId(0))
+    assert not r1.admin_log
     assert r1.current_attempt() == 0
     assert r1.attempt_count() == 1
     attempt = r1.attempts[r1.current_attempt()]
     assert attempt.error == "Too boring"
     assert attempt.pipeline == "me"
-    assert attempt.poke_reason is None
     assert attempt.pipeline_version is None
     assert r1.status == rue.Status.TODO, r1
     # claim again so that try counter is increased
@@ -82,8 +82,12 @@ async def main():
     assert it4_new and it4_new.id == it4.id, it4_new
     assert it4_new.attempts[it4_new.current_attempt()].pipeline_version == "1.0"
     # second failure should move to error
-    r2 = await queue.fail(it4, "Too boring", it4_new.current_attempt())
+    r2 = await queue.fail(it4, "Too boring", it4_new.current_attempt(), is_poke = True)
     assert r2.status == rue.Status.ERROR, r2
+    assert len(r2.admin_log) == 1 \
+        and r2.admin_log[0].action == ("fail", it4_new.current_attempt()) \
+        and r2.admin_log[0].reason == "Too boring" \
+        and abs(time.time() - r2.admin_log[0].time.timestamp()) < 10
     # and finishing should work nonetheless
     assert (await queue.finish(it4)).status == rue.Status.DONE
 
